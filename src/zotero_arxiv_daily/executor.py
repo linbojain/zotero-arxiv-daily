@@ -29,6 +29,41 @@ def normalize_path_patterns(patterns: list[str] | ListConfig | None, config_key:
     return list(patterns)
 
 
+def add_translated_abstract(paper, openai_client, llm_params) -> None:
+    """Translate the abstract with the LLM and append it below the TLDR in the email."""
+    import html as _html
+    import re as _re
+    from .protocol import _request_llm
+    if not paper.abstract:
+        return
+    lang = llm_params.get("translate_language", None) or llm_params.get("language", "Traditional Chinese")
+    try:
+        text = _request_llm(
+            openai_client,
+            llm_params,
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        f"You are a professional medical and scientific translator. Translate the paper abstract "
+                        f"into {lang}. If the target is Chinese, use Traditional Chinese characters (Taiwan usage). "
+                        "On first mention of each technical term, keep the original English in parentheses, "
+                        "e.g. 全膝關節置換術 (total knee arthroplasty). Keep section labels such as BACKGROUND or "
+                        "METHODS translated. Output only the translation, with no preface or explanation."
+                    ),
+                },
+                {"role": "user", "content": paper.abstract},
+            ],
+        )
+        text = _re.sub(r"<think>.*?</think>", "", text or "", flags=_re.DOTALL).strip()
+        if not text:
+            return
+        translated = _html.escape(text).replace("\n", "<br>")
+        paper.tldr = f"{paper.tldr}<br><br><strong>中文摘要：</strong><br>{translated}"
+    except Exception as e:
+        logger.warning(f"Failed to translate abstract of {paper.url}: {e}")
+
+
 class Executor:
     def __init__(self, config:DictConfig):
         self.config = config
@@ -115,6 +150,8 @@ class Executor:
             for p in tqdm(reranked_papers):
                 p.generate_tldr(self.openai_client, self.config.llm)
                 p.generate_affiliations(self.openai_client, self.config.llm)
+                if self.config.llm.get("translate_abstract", False):
+                    add_translated_abstract(p, self.openai_client, self.config.llm)
         elif not self.config.executor.send_empty:
             logger.info("No new papers found. No email will be sent.")
             return
